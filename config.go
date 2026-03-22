@@ -35,7 +35,7 @@ func LoadConfig() *Config {
 
 	groqModel := os.Getenv("GROQ_MODEL")
 	if groqModel == "" {
-		groqModel = "llama-3.1-8b-instant"
+		groqModel = "llama-3.3-70b-versatile"
 	}
 
 	ledgerPath := os.Getenv("LEDGER_PATH")

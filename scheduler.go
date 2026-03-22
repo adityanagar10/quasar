@@ -248,11 +248,13 @@ func (s *Scheduler) runTimeLogReminder() {
 		return
 	}
 	c := cron.New()
-	// Hourly prompt: X:50 from 9 AM through 8 PM (9:50, 10:50, ..., 20:50)
+	// Hourly prompt: X:50 from 9 AM through 8 PM IST (9:50, 10:50, ..., 20:50)
 	c.AddFunc("50 9-20 * * *", func() {
 		now := time.Now()
 		text := fmt.Sprintf("🕐 %d:%02d — What did you work on in the last hour?", now.Hour(), now.Minute())
-		s.bot.Send(tgbotapi.NewMessage(s.timeLogChatID, text))
+		if _, err := s.bot.Send(tgbotapi.NewMessage(s.timeLogChatID, text)); err != nil {
+			log.Printf("time log reminder: send error: %v", err)
+		}
 	})
 	// EOD summary at 9:00 PM
 	c.AddFunc("0 21 * * *", func() {

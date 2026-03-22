@@ -176,6 +176,22 @@ func (d *DB) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_yearly_expenses_user_id ON yearly_expenses(user_id)`,
 
+		// --- Request logs ---
+		`CREATE TABLE IF NOT EXISTS request_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			chat_id INTEGER NOT NULL,
+			username TEXT,
+			user_message TEXT NOT NULL,
+			tool_name TEXT,
+			tool_args TEXT,
+			reply TEXT NOT NULL,
+			latency_ms INTEGER NOT NULL,
+			error TEXT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_request_logs_chat_id ON request_logs(chat_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON request_logs(created_at)`,
+
 		// --- Time log tables ---
 		`CREATE TABLE IF NOT EXISTS time_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -367,7 +383,7 @@ func (d *DB) ListTasks(userID int64) ([]Task, error) {
 		if err := rows.Scan(&t.ID, &t.Content, &t.Completed, &ts); err != nil {
 			return nil, err
 		}
-		t.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", ts)
+		t.CreatedAt = parseTimestamp(ts)
 		tasks = append(tasks, t)
 	}
 	return tasks, rows.Err()
@@ -466,7 +482,7 @@ func scanReminders(rows *sql.Rows) ([]Reminder, error) {
 		if err := rows.Scan(&r.ID, &r.UserID, &r.Content, &ts); err != nil {
 			return nil, err
 		}
-		r.RemindAt, _ = time.Parse("2006-01-02 15:04:05", ts)
+		r.RemindAt = parseTimestamp(ts)
 		reminders = append(reminders, r)
 	}
 	return reminders, rows.Err()
@@ -606,7 +622,7 @@ func (d *DB) ListActivities(userID int64, limit int) ([]Activity, error) {
 		if err := rows.Scan(&a.ID, &a.Category, &a.Content, &a.Mood, &a.Duration, &ts); err != nil {
 			return nil, err
 		}
-		a.CompletedAt, _ = time.Parse("2006-01-02 15:04:05", ts)
+		a.CompletedAt = parseTimestamp(ts)
 		acts = append(acts, a)
 	}
 	return acts, rows.Err()
@@ -680,7 +696,7 @@ func scanNotes(rows *sql.Rows) ([]Note, error) {
 		if err := rows.Scan(&n.ID, &n.Title, &n.Content, &ts); err != nil {
 			return nil, err
 		}
-		n.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", ts)
+		n.CreatedAt = parseTimestamp(ts)
 		notes = append(notes, n)
 	}
 	return notes, rows.Err()
@@ -724,7 +740,7 @@ func (d *DB) ListAccounts(userID int64) ([]Account, error) {
 		if err := rows.Scan(&a.ID, &a.UserID, &a.Name, &a.StartingBalance, &ts); err != nil {
 			return nil, err
 		}
-		a.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", ts)
+		a.CreatedAt = parseTimestamp(ts)
 		accounts = append(accounts, a)
 	}
 	return accounts, rows.Err()
@@ -740,7 +756,7 @@ func (d *DB) GetAccountByName(userID int64, name string) (*Account, error) {
 	if err != nil {
 		return nil, err
 	}
-	a.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", ts)
+	a.CreatedAt = parseTimestamp(ts)
 	return a, nil
 }
 
@@ -772,6 +788,29 @@ func (d *DB) AddTransaction(userID, accountID int64, amount float64, merchant, c
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+func (d *DB) ListTransactions(userID int64, limit int) ([]Transaction, error) {
+	rows, err := d.conn.Query(
+		`SELECT id, user_id, account_id, amount, merchant, category, transacted_at FROM transactions
+		 WHERE user_id = ? ORDER BY transacted_at DESC LIMIT ?`,
+		userID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var txns []Transaction
+	for rows.Next() {
+		var t Transaction
+		var ts string
+		if err := rows.Scan(&t.ID, &t.UserID, &t.AccountID, &t.Amount, &t.Merchant, &t.Category, &ts); err != nil {
+			return nil, err
+		}
+		t.TransactedAt = parseTimestamp(ts)
+		txns = append(txns, t)
+	}
+	return txns, rows.Err()
 }
 
 func (d *DB) GetMonthSummary(userID int64, year, month int) (total float64, byCategory map[string]float64, err error) {
@@ -1054,6 +1093,26 @@ func (d *DB) MarkYearlyExpenseReminded(id int64) error {
 	return err
 }
 
+// --- Request Log ---
+
+func (d *DB) AddRequestLog(chatID int64, username, userMessage, toolName, toolArgs, reply string, latencyMs int64, errMsg string) error {
+	var toolNameVal, toolArgsVal, errVal interface{}
+	if toolName != "" {
+		toolNameVal = toolName
+	}
+	if toolArgs != "" {
+		toolArgsVal = toolArgs
+	}
+	if errMsg != "" {
+		errVal = errMsg
+	}
+	_, err := d.conn.Exec(
+		`INSERT INTO request_logs (chat_id, username, user_message, tool_name, tool_args, reply, latency_ms, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		chatID, username, userMessage, toolNameVal, toolArgsVal, reply, latencyMs, errVal,
+	)
+	return err
+}
+
 // --- Time Log ---
 
 type TimeLog struct {
@@ -1108,7 +1167,7 @@ func scanTimeLogs(rows *sql.Rows) ([]TimeLog, error) {
 		if err := rows.Scan(&tl.ID, &tl.UserID, &tl.Content, &ts); err != nil {
 			return nil, err
 		}
-		tl.LoggedAt, _ = time.Parse("2006-01-02 15:04:05", ts)
+		tl.LoggedAt = parseTimestamp(ts)
 		logs = append(logs, tl)
 	}
 	return logs, rows.Err()
@@ -1116,6 +1175,23 @@ func scanTimeLogs(rows *sql.Rows) ([]TimeLog, error) {
 
 func (d *DB) Close() error {
 	return d.conn.Close()
+}
+
+var tsFormats = []string{
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02 15:04:05",
+	"2006-01-02T15:04:05Z",
+	"2006-01-02T15:04:05",
+	time.RFC3339,
+}
+
+func parseTimestamp(ts string) time.Time {
+	for _, f := range tsFormats {
+		if t, err := time.Parse(f, ts); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 func init() {

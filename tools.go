@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -10,156 +9,19 @@ import (
 	"adityanagar.com/ad-bot/internal/ledger"
 )
 
-// Action is a normalised intent extracted from the model's reply.
+// Action holds a structured intent produced by a tool call.
 type Action struct {
-	Action   string  `json:"action"`
-	Content  string  `json:"content,omitempty"`
-	ID       int64   `json:"id,omitempty"`
-	Amount   float64 `json:"amount,omitempty"`
-	Account  string  `json:"account,omitempty"`
-	Merchant string  `json:"merchant,omitempty"`
-	Category string  `json:"category,omitempty"`
-	Balance  float64 `json:"balance,omitempty"`
-	Name     string  `json:"name,omitempty"`
-	Day      int     `json:"day,omitempty"`
-	DueDate  string  `json:"due_date,omitempty"` // "MM-DD"
-}
-
-// ParseAction extracts an action from the model's reply.
-// Handles our preferred format and llama3.2's native {"name":...} format.
-func ParseAction(reply string) *Action {
-	reply = strings.TrimSpace(reply)
-	start := strings.Index(reply, "{")
-	end := strings.LastIndex(reply, "}")
-	if start == -1 || end <= start {
-		return nil
-	}
-	blob := reply[start : end+1]
-
-	// 1. Our clean format: {"action":"add_note","content":"..."}
-	var a Action
-	if err := json.Unmarshal([]byte(blob), &a); err == nil && a.Action != "" {
-		return &a
-	}
-
-	// 2. llama3.2 native: {"name":"notes","parameters":{...}}
-	var native struct {
-		Name       string          `json:"name"`
-		Parameters json.RawMessage `json:"parameters"`
-	}
-	if err := json.Unmarshal([]byte(blob), &native); err == nil && native.Name != "" {
-		return mapNative(native.Name, native.Parameters)
-	}
-
-	return nil
-}
-
-var nameMap = map[string]string{
-	"add_note":       "add_note",
-	"note":           "add_note",
-	"save_note":      "add_note",
-	"notes":          "list_notes",
-	"list_notes":     "list_notes",
-	"get_notes":      "list_notes",
-	"delete_note":    "delete_note",
-	"remove_note":    "delete_note",
-	"add_task":       "add_task",
-	"task":           "add_task",
-	"create_task":    "add_task",
-	"tasks":          "list_tasks",
-	"list_tasks":     "list_tasks",
-	"get_tasks":      "list_tasks",
-	"complete_task":  "complete_task",
-	"done_task":      "complete_task",
-	"done":           "complete_task",
-	"delete_task":    "delete_task",
-	"remove_task":    "delete_task",
-	"complete_all":   "complete_all_tasks",
-	// Finance
-	"set_account":         "set_account",
-	"add_account":         "set_account",
-	"list_accounts":       "list_accounts",
-	"accounts":            "list_accounts",
-	"my_accounts":         "list_accounts",
-	"add_expense":         "add_expense",
-	"expense":             "add_expense",
-	"spent":               "add_expense",
-	"paid":                "add_expense",
-	"get_summary":         "get_summary",
-	"summary":             "get_summary",
-	"balance":             "get_summary",
-	"spending":            "get_summary",
-	"add_sip":             "add_sip",
-	"sip":                 "add_sip",
-	"list_sips":           "list_sips",
-	"add_yearly_expense":  "add_yearly_expense",
-	"yearly":              "add_yearly_expense",
-	"insurance":           "add_yearly_expense",
-	"list_yearly_expenses": "list_yearly_expenses",
-	"yearly_expenses":     "list_yearly_expenses",
-	// Time logging
-	"log_time":        "log_time",
-	"time_log":        "log_time",
-	"logged":          "log_time",
-	"list_time_logs":  "list_time_logs",
-	"time_logs":       "list_time_logs",
-	"my_logs":         "list_time_logs",
-}
-
-func mapNative(name string, rawParams json.RawMessage) *Action {
-	action, ok := nameMap[name]
-	if !ok {
-		return nil
-	}
-	a := &Action{Action: action}
-	if len(rawParams) == 0 {
-		return a
-	}
-	var flat map[string]interface{}
-	if err := json.Unmarshal(rawParams, &flat); err != nil {
-		return a
-	}
-	if content := deepString(flat, "content"); content != "" {
-		a.Content = content
-	}
-	if id := deepInt(flat, "id"); id != 0 {
-		a.ID = id
-	}
-	return a
-}
-
-func deepString(m map[string]interface{}, key string) string {
-	for k, v := range m {
-		if strings.EqualFold(k, key) {
-			if s, ok := v.(string); ok && s != "" &&
-				!strings.Contains(s, `"type"`) &&
-				!strings.Contains(s, `"description"`) {
-				return s
-			}
-		}
-		if sub, ok := v.(map[string]interface{}); ok {
-			if found := deepString(sub, key); found != "" {
-				return found
-			}
-		}
-	}
-	return ""
-}
-
-func deepInt(m map[string]interface{}, key string) int64 {
-	for k, v := range m {
-		if strings.EqualFold(k, key) {
-			if n, ok := v.(float64); ok {
-				return int64(n)
-			}
-		}
-		if sub, ok := v.(map[string]interface{}); ok {
-			if found := deepInt(sub, key); found != 0 {
-				return found
-			}
-		}
-	}
-	return 0
+	Action   string
+	Content  string
+	ID       int64
+	Amount   float64
+	Account  string
+	Merchant string
+	Category string
+	Balance  float64
+	Name     string
+	Day      int
+	DueDate  string // "MM-DD"
 }
 
 // ExecuteAction runs an action and returns a user-ready reply string.
@@ -326,6 +188,26 @@ func ExecuteAction(database *db.DB, lw *ledger.Writer, userID int64, a *Action) 
 			reply += fmt.Sprintf(" from %s", a.Account)
 		}
 		return reply + "."
+
+	case "list_transactions":
+		limit := 20
+		txns, err := database.ListTransactions(userID, limit)
+		if err != nil {
+			return "Couldn't fetch transactions right now."
+		}
+		if len(txns) == 0 {
+			return "No transactions recorded yet."
+		}
+		var sb strings.Builder
+		sb.WriteString("Recent transactions:\n")
+		for _, t := range txns {
+			label := t.Merchant
+			if t.Category != "" && t.Category != t.Merchant && t.Category != "Expenses:General" {
+				label += " (" + t.Category + ")"
+			}
+			sb.WriteString(fmt.Sprintf("  [%s] ₹%.2f — %s\n", t.TransactedAt.Format("Jan 2, 15:04"), t.Amount, label))
+		}
+		return strings.TrimSpace(sb.String())
 
 	case "get_summary":
 		if a.Account != "" {

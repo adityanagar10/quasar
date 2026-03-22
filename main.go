@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -88,62 +91,91 @@ func handleMessage(update tgbotapi.Update, database *db.DB, lw *ledger.Writer, b
 	goals, _ := database.ListGoals(user.ID)
 	systemPrompt := groq.BuildSystemPrompt(goals)
 
+	log.Printf("[%s] msg from @%s (%d): %q", time.Now().Format("15:04:05"), update.Message.From.UserName, chatID, text)
+
 	bot.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
 
+	start := time.Now()
 	resp, err := client.Chat(systemPrompt, history, text)
+	latency := time.Since(start).Milliseconds()
+
 	if err != nil {
+		log.Printf("[%s] llm error after %dms: %v", time.Now().Format("15:04:05"), latency, err)
+		database.AddRequestLog(chatID, update.Message.From.UserName, text, "", "", "", latency, err.Error())
 		send(bot, chatID, fmt.Sprintf("AI error: %v", err))
 		return
 	}
 
-	raw := strings.TrimSpace(resp.Message.Content)
-	raw = stripThinkTags(raw)
-	log.Printf("llm raw: %q", raw)
+	var reply, toolName, toolArgs string
 
-	action := ParseAction(raw)
-	var reply string
-
-	if action != nil {
-		log.Printf("action: %s id=%d content=%q", action.Action, action.ID, action.Content)
+	if resp.ToolCall != nil {
+		toolName = resp.ToolCall.Name
+		if b, e := json.Marshal(resp.ToolCall.Arguments); e == nil {
+			toolArgs = string(b)
+		}
+		log.Printf("[%s] tool=%s args=%s latency=%dms", time.Now().Format("15:04:05"), toolName, toolArgs, latency)
+		action := toolCallToAction(resp.ToolCall)
 		reply = ExecuteAction(database, lw, user.ID, action)
 		if reply == "" {
-			// Unknown action — treat as plain conversation
-			reply = raw
+			reply = "Done."
 		}
 	} else {
-		// Plain conversation — but don't send raw JSON noise to the user
-		if strings.HasPrefix(raw, "{") && strings.HasSuffix(raw, "}") {
-			reply = "Sorry, I didn't quite get that. Could you rephrase?"
-		} else {
-			reply = raw
+		reply = strings.TrimSpace(resp.Message.Content)
+		if reply == "" {
+			reply = "Done."
 		}
+		log.Printf("[%s] text response latency=%dms", time.Now().Format("15:04:05"), latency)
 	}
 
-	if reply == "" {
-		reply = "Done."
-	}
-
+	log.Printf("[%s] reply: %q", time.Now().Format("15:04:05"), reply)
+	database.AddRequestLog(chatID, update.Message.From.UserName, text, toolName, toolArgs, reply, latency, "")
 	database.AddMessage(session.ID, "user", text)
 	database.AddMessage(session.ID, "assistant", reply)
 	send(bot, chatID, reply)
 }
 
-// stripThinkTags removes <think>...</think> blocks produced by reasoning models
-// like deepseek-r1 before the actual response content.
-func stripThinkTags(s string) string {
-	for {
-		start := strings.Index(s, "<think>")
-		if start == -1 {
-			break
-		}
-		end := strings.Index(s, "</think>")
-		if end == -1 {
-			s = strings.TrimSpace(s[:start])
-			break
-		}
-		s = strings.TrimSpace(s[:start] + s[end+len("</think>"):])
+func toolCallToAction(tc *groq.ToolCall) *Action {
+	a := &Action{Action: tc.Name}
+	args := tc.Arguments
+	if v, ok := args["content"].(string); ok {
+		a.Content = v
 	}
-	return strings.TrimSpace(s)
+	if v, ok := args["id"].(float64); ok {
+		a.ID = int64(v)
+	}
+	if v, ok := args["amount"].(float64); ok {
+		a.Amount = v
+	} else if s, ok := args["amount"].(string); ok {
+		a.Amount, _ = strconv.ParseFloat(s, 64)
+	}
+	if v, ok := args["balance"].(float64); ok {
+		a.Balance = v
+	} else if s, ok := args["balance"].(string); ok {
+		a.Balance, _ = strconv.ParseFloat(s, 64)
+	}
+	if v, ok := args["name"].(string); ok {
+		a.Name = v
+	}
+	if v, ok := args["account"].(string); ok {
+		a.Account = v
+	}
+	if v, ok := args["merchant"].(string); ok {
+		a.Merchant = v
+	}
+	if v, ok := args["category"].(string); ok {
+		a.Category = v
+	}
+	if v, ok := args["day"].(float64); ok {
+		a.Day = int(v)
+	} else if s, ok := args["day"].(string); ok {
+		if n, err := strconv.Atoi(s); err == nil {
+			a.Day = n
+		}
+	}
+	if v, ok := args["due_date"].(string); ok {
+		a.DueDate = v
+	}
+	return a
 }
 
 func send(bot *tgbotapi.BotAPI, chatID int64, text string) {
